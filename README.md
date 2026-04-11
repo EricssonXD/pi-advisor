@@ -9,6 +9,8 @@
 - curates transcript context before calling the advisor model
 - renders advisor output as a compact block in the Pi TUI
 - exposes `/advisor` commands for enable/disable/config/manual trigger
+- configurable reasoning effort (`minimal`–`xhigh`) via pi-ai `completeSimple` API
+- tab completion for `/advisor` subcommands and config keys
 
 ## Install
 
@@ -44,6 +46,20 @@ Enable a specific model:
 
 ```bash
 /advisor on anthropic/claude-opus-4-6
+```
+
+Set reasoning effort (default: high):
+
+```bash
+/advisor config reasoning=xhigh
+```
+
+Available levels: `minimal`, `low`, `medium`, `high`, `xhigh`.
+
+Set max context messages sent to advisor (default: 18):
+
+```bash
+/advisor config maxContextMessages=24
 ```
 
 Show config:

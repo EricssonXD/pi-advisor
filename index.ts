@@ -22,7 +22,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import { complete, type Message, type TextContent, type ThinkingContent, type ToolCall } from "@mariozechner/pi-ai";
+import { completeSimple, type Message, type TextContent, type ThinkingContent, type ThinkingLevel, type ToolCall } from "@mariozechner/pi-ai";
 import { getAgentDir, getMarkdownTheme, keyHint, type ExtensionAPI, type SessionEntry, type ToolRenderResultOptions } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -33,6 +33,8 @@ interface AdvisorConfig {
 	model: string;
 	maxUsesPerRun: number;
 	maxTokens: number;
+	reasoning: ThinkingLevel;
+	maxContextMessages: number;
 }
 
 interface AdvisorUsage {
@@ -72,13 +74,16 @@ const DEFAULT_CONFIG: AdvisorConfig = {
 	model: "claude-opus-4-6",
 	maxUsesPerRun: 3,
 	maxTokens: 8192,
+	reasoning: "high",
+	maxContextMessages: 18,
 };
 
-const MAX_ADVISOR_MESSAGES = 18;
 const MAX_TEXT_LINES = 24;
 const MAX_TEXT_CHARS = 1800;
 const MAX_SYSTEM_PROMPT_CHARS = 12000;
 const RECENT_TOOL_SUMMARY_COUNT = 8;
+
+const VALID_REASONING_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh"];
 
 const ADVISOR_SYSTEM_PROMPT = `You are an expert advisor providing strategic guidance to a coding agent.
 
@@ -125,6 +130,8 @@ function loadConfig(): AdvisorConfig {
 			model: typeof raw.model === "string" ? raw.model : DEFAULT_CONFIG.model,
 			maxUsesPerRun: typeof raw.maxUsesPerRun === "number" ? raw.maxUsesPerRun : DEFAULT_CONFIG.maxUsesPerRun,
 			maxTokens: typeof raw.maxTokens === "number" ? raw.maxTokens : DEFAULT_CONFIG.maxTokens,
+			reasoning: VALID_REASONING_LEVELS.includes(raw.reasoning) ? raw.reasoning : DEFAULT_CONFIG.reasoning,
+			maxContextMessages: typeof raw.maxContextMessages === "number" ? raw.maxContextMessages : DEFAULT_CONFIG.maxContextMessages,
 		};
 	} catch {
 		return { ...DEFAULT_CONFIG };
@@ -324,7 +331,7 @@ function summarizeToolResultContent(toolName: string, content: unknown): Array<{
 	});
 }
 
-function buildAdvisorMessages(branch: SessionEntry[], stageInfo: AdvisorStageInfo, recentToolActivity: string): Message[] {
+function buildAdvisorMessages(branch: SessionEntry[], stageInfo: AdvisorStageInfo, recentToolActivity: string, maxMessages: number): Message[] {
 	const transcript: Message[] = [];
 
 	for (const entry of branch) {
@@ -362,12 +369,12 @@ function buildAdvisorMessages(branch: SessionEntry[], stageInfo: AdvisorStageInf
 		timestamp: Date.now(),
 	};
 
-	if (transcript.length <= MAX_ADVISOR_MESSAGES) {
+	if (transcript.length <= maxMessages) {
 		return [contextMessage, ...transcript];
 	}
 
 	const keepFirst = 2;
-	const keepLast = MAX_ADVISOR_MESSAGES - keepFirst - 1;
+	const keepLast = maxMessages - keepFirst - 1;
 	const omitted = transcript.length - keepFirst - keepLast;
 	const omittedMessage: Message = {
 		role: "user",
@@ -522,7 +529,7 @@ The advisor cannot call tools — it only provides text advice for the executor.
 			const stageInfo = detectStage(runToolEvents, usesThisRun);
 			const recentToolActivity = buildRecentToolActivity(runToolEvents);
 			const branch = ctx.sessionManager.getBranch();
-			const advisorMessages = buildAdvisorMessages(branch, stageInfo, recentToolActivity);
+			const advisorMessages = buildAdvisorMessages(branch, stageInfo, recentToolActivity, config.maxContextMessages);
 			if (advisorMessages.length === 0) {
 				return {
 					content: [{ type: "text", text: "No conversation context available for advisor. Continue without advice." }],
@@ -534,7 +541,7 @@ The advisor cannot call tools — it only provides text advice for the executor.
 			const advisorPrompt = buildAdvisorPrompt(executorSystemPrompt, buildActiveToolsSummary(pi), stageInfo);
 
 			try {
-				const response = await complete(
+				const response = await completeSimple(
 					model,
 					{
 						systemPrompt: advisorPrompt,
@@ -545,6 +552,7 @@ The advisor cannot call tools — it only provides text advice for the executor.
 						headers: auth.headers,
 						maxTokens: config.maxTokens,
 						signal,
+						reasoning: config.reasoning,
 					},
 				);
 
@@ -626,6 +634,24 @@ The advisor cannot call tools — it only provides text advice for the executor.
 
 	pi.registerCommand("advisor", {
 		description: "Manage advisor tool: on, off, config, ask",
+		getArgumentCompletions: (prefix) => {
+			const subcommands = ["on", "off", "config", "ask"];
+			const trimmed = prefix.trim();
+			if (!trimmed.includes(" ")) {
+				const matches = subcommands.filter((s) => s.startsWith(trimmed));
+				return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
+			}
+
+			const parts = trimmed.split(/\s+/);
+			if (parts[0] === "config" && parts.length <= 2) {
+				const keys = ["provider=", "model=", "maxUsesPerRun=", "maxTokens=", "reasoning=", "maxContextMessages="];
+				const lastPart = parts[parts.length - 1] ?? "";
+				const matches = keys.filter((k) => k.startsWith(lastPart));
+				return matches.length > 0 ? matches.map((k) => ({ value: `config ${k}`, label: k })) : null;
+			}
+
+			return null;
+		},
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/);
 			const subcommand = parts[0]?.toLowerCase() || "";
@@ -676,6 +702,8 @@ The advisor cannot call tools — it only provides text advice for the executor.
 							`  Model:        ${config.model}`,
 							`  Max uses/run: ${config.maxUsesPerRun}`,
 							`  Max tokens:   ${config.maxTokens}`,
+							`  Reasoning:    ${config.reasoning}`,
+							`  Context msgs: ${config.maxContextMessages}`,
 							"",
 							"Usage:",
 							"  /advisor on [provider/model]  Enable advisor",
@@ -683,7 +711,8 @@ The advisor cannot call tools — it only provides text advice for the executor.
 							"  /advisor config key=value     Set config value",
 							"  /advisor ask                  Trigger consultation",
 							"",
-							"Config keys: provider, model, maxUsesPerRun, maxTokens",
+							"Config keys: provider, model, maxUsesPerRun, maxTokens, reasoning, maxContextMessages",
+							`Reasoning levels: ${VALID_REASONING_LEVELS.join(", ")}`,
 						];
 						ctx.ui.notify(lines.join("\n"), "info");
 						return;
@@ -721,8 +750,25 @@ The advisor cannot call tools — it only provides text advice for the executor.
 							config.maxTokens = num;
 							break;
 						}
+						case "reasoning": {
+							if (!VALID_REASONING_LEVELS.includes(value as ThinkingLevel)) {
+								ctx.ui.notify("reasoning must be one of: minimal, low, medium, high, xhigh", "warning");
+								return;
+							}
+							config.reasoning = value as ThinkingLevel;
+							break;
+						}
+						case "maxContextMessages": {
+							const num = Number.parseInt(value, 10);
+							if (Number.isNaN(num) || num < 4) {
+								ctx.ui.notify("maxContextMessages must be at least 4", "warning");
+								return;
+							}
+							config.maxContextMessages = num;
+							break;
+						}
 						default:
-							ctx.ui.notify("Unknown config key. Valid keys: provider, model, maxUsesPerRun, maxTokens", "warning");
+							ctx.ui.notify("Unknown config key. Valid keys: provider, model, maxUsesPerRun, maxTokens, reasoning, maxContextMessages", "warning");
 							return;
 					}
 
@@ -749,7 +795,8 @@ The advisor cannot call tools — it only provides text advice for the executor.
 					const status = config.enabled ? ctx.ui.theme.fg("success", "enabled") : ctx.ui.theme.fg("dim", "disabled");
 					const lines = [
 						`Advisor: ${status}`,
-						`Model: ${config.provider}/${config.model}`,
+						`Model:     ${config.provider}/${config.model}`,
+						`Reasoning: ${config.reasoning}`,
 						"",
 						"Commands:",
 						"  /advisor on [provider/model]  Enable advisor",
