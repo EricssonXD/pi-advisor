@@ -4,8 +4,9 @@
  * Registers an LLM-callable tool named `advisor` that allows the executor model
  * to consult a stronger "advisor" model for strategic guidance on complex decisions.
  *
- * Design based on Anthropic's advisor tool pattern:
- * https://claude.com/blog/the-advisor-strategy
+ * Design follows the advisor tool pattern: the executor keeps doing the work and
+ * only calls the advisor when it needs strategic guidance — not for syntax-level
+ * questions or routine implementation steps.
  *
  * The advisor:
  * - Sees a curated transcript plus the executor's current system prompt
@@ -24,7 +25,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { completeSimple, type Message, type TextContent, type ThinkingContent, type ThinkingLevel, type ToolCall } from "@mariozechner/pi-ai";
 import { getAgentDir, keyHint, type ExtensionAPI, type SessionEntry, type ToolRenderResultOptions } from "@mariozechner/pi-coding-agent";
-import { buildAdvisorMessages } from "./advisor-messages.ts";
+import { buildAdvisorMessages } from "./src/advisor-messages.ts";
 import { Container, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 

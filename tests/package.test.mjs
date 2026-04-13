@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { buildAdvisorMessages } from '../advisor-messages.ts';
+import { buildAdvisorMessages } from '../src/advisor-messages.ts';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,8 +29,8 @@ test('package manifest declares a pi package entrypoint', () => {
   assert.ok(Array.isArray(pkg.keywords) && pkg.keywords.includes('pi-package'), 'keywords should include pi-package');
   assert.deepEqual(pkg.pi?.extensions, ['./index.ts']);
   assert.ok(Array.isArray(pkg.files) && pkg.files.includes('index.ts'), 'package files should include index.ts');
-  assert.ok(pkg.files?.includes('advisor-messages.ts'), 'package files should include advisor-messages.ts');
-  assert.equal(pkg.files?.includes('advisor.ts'), false, 'package files should not include advisor.ts');
+  assert.ok(Array.isArray(pkg.files) && pkg.files.includes('src/'), 'package files should include src/');
+  assert.equal(pkg.files?.includes('advisor-messages.ts'), false, 'package files should not include advisor-messages.ts at root');
 
   assert.equal(pkg.repository?.type, 'git');
   assert.match(pkg.repository?.url ?? '', /github\.com[:/]RimuruW\/pi-advisor(\.git)?$/i);
@@ -44,7 +44,9 @@ test('package manifest declares a pi package entrypoint', () => {
 
 test('package keeps a single extension entry file at the root', () => {
   assert.ok(existsSync(join(repoRoot, 'index.ts')), 'index.ts should exist');
-  assert.equal(existsSync(join(repoRoot, 'advisor.ts')), false, 'advisor.ts should not exist once index.ts is the real implementation');
+  assert.ok(existsSync(join(repoRoot, 'src/advisor-messages.ts')), 'src/advisor-messages.ts should exist');
+  assert.equal(existsSync(join(repoRoot, 'advisor-messages.ts')), false, 'advisor-messages.ts should not exist at root');
+  assert.equal(existsSync(join(repoRoot, 'advisor.ts')), false, 'advisor.ts should not exist');
 });
 
 test('README documents install and usage', () => {
@@ -59,13 +61,14 @@ test('README documents install and usage', () => {
 });
 
 
-test('CHANGELOG includes the 0.1.0 release entry', () => {
+test('CHANGELOG includes the 0.2.0 release entry', () => {
   const changelogPath = join(repoRoot, 'CHANGELOG.md');
   assert.ok(existsSync(changelogPath), 'CHANGELOG.md should exist');
 
   const changelog = readFileSync(changelogPath, 'utf8');
   assert.match(changelog, /^# Changelog/m);
-  assert.match(changelog, /^## \[0\.1\.0\]/m);
+  assert.match(changelog, /^## \[0\.2\.0\]/m);
+  assert.match(changelog, /^## \[0\.1\.0\]/m, 'CHANGELOG should retain 0.1.0 entry');
 });
 
 test('package includes a license file matching package.json', () => {

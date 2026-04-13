@@ -1,6 +1,6 @@
 {
   "name": "pi-advisor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pi extension package that adds a Claude-style advisor tool for strategic guidance during complex agent tasks.",
   "type": "module",
   "repository": {
@@ -20,7 +20,7 @@
   "license": "MIT",
   "files": [
     "index.ts",
-    "advisor-messages.ts",
+    "src/",
     "README.md",
     "CHANGELOG.md"
   ],
