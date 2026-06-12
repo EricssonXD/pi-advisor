@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Edit/write summaries in advisor context now include `(+added/-removed)` line stats derived from the edit tool's unified patch details.
 
 ### Changed
+- Advisor system prompt now states it sees a curated subset of the executor's context (not "what the executor sees") and instructs the advisor to request missing evidence as its first action item instead of guessing when the transcript is too thin to judge.
+- The final-check stage directive points the advisor at the original user request retained at the top of the transcript, so sign-off is checked against the user's requirements rather than the executor's interpretation.
+- Context policy wording fixed to match actual behavior: tool results are summarized (not "not replayed"), truncation omits middle messages (task framing is retained), and the transcript sits above the closing context block.
 - Removed the duplicated `<advisor-tool>` system prompt injection: usage guidance now lives solely in the tool's `promptGuidelines`, which pi injects natively when the tool is active. The executor system prompt no longer carries the advisor instructions twice.
 - Advisor context (stage, directive, executor signals, recent tool activity) moved from the head of the transcript to the closing user message, next to where model attention is strongest; the advisor system prompt is now stage-agnostic and stable across calls.
 - Advisor model calls now pass the pi session ID for provider-side cache affinity across repeated consultations.

@@ -55,10 +55,10 @@ export function summarizeAssistantContent(content: Array<{ type?: string; text?:
 
 function buildContextPolicy(): string {
 	return `Context policy:
-- Assistant tool calls are stripped from the transcript below.
-- Tool results are not replayed.
+- Assistant tool calls are stripped from the transcript above.
+- Tool results are summarized under "Recent tool activity", not replayed in full.
 - User task framing is retained where possible.
-- If truncated: earliest messages omitted, focus on recent evidence.`;
+- If truncated: middle messages omitted, focus on the task framing and recent evidence.`;
 }
 
 function buildSignalsBlock(signals: ExecutorSignals): string {
