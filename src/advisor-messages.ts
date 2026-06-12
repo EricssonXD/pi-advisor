@@ -16,6 +16,7 @@ type SessionEntryLike = {
 type AdvisorStageInfoLike = {
 	stage: string;
 	reason: string;
+	directive?: string;
 };
 
 const MAX_TEXT_LINES = 24;
@@ -74,20 +75,6 @@ function buildSignalsBlock(signals: ExecutorSignals): string {
 - Recent failures: ${rf}`;
 }
 
-function ensureAdvisorRequestClosure(messages: AdvisorMessage[]): AdvisorMessage[] {
-	if (messages.length === 0) return messages;
-	const last = messages[messages.length - 1];
-	if (last.role === "user") return messages;
-	return [
-		...messages,
-		{
-			role: "user",
-			content: "Provide your advisory assessment now based on the context above.",
-			timestamp: Date.now(),
-		},
-	];
-}
-
 export function buildAdvisorMessages(
 	branch: SessionEntryLike[],
 	stageInfo: AdvisorStageInfoLike,
@@ -120,24 +107,29 @@ export function buildAdvisorMessages(
 
 	if (transcript.length === 0) return [];
 
+	// Stage, signals, and recent activity are the freshest evidence, so they go
+	// in the closing message where the advisor's attention is strongest — not at
+	// the head of a long transcript.
 	const contextBlocks: string[] = [buildContextPolicy()];
 	contextBlocks.push(`Current advisory stage: ${stageInfo.stage}`);
+	if (stageInfo.directive) contextBlocks.push(`Stage objective: ${stageInfo.directive}`);
 	contextBlocks.push(`Why this stage: ${stageInfo.reason}`);
 	if (signals) contextBlocks.push(buildSignalsBlock(signals));
 	contextBlocks.push(recentToolActivity ? `Recent tool activity:\n${recentToolActivity}` : "Recent tool activity: none yet");
+	contextBlocks.push("Provide your advisory assessment now based on the transcript and the context above.");
 
-	const contextMessage: AdvisorMessage = {
+	const closingContextMessage: AdvisorMessage = {
 		role: "user",
 		content: contextBlocks.join("\n\n"),
 		timestamp: Date.now(),
 	};
 
-	if (transcript.length <= maxMessages) {
-		return ensureAdvisorRequestClosure([contextMessage, ...transcript]);
+	if (transcript.length + 1 <= maxMessages) {
+		return [...transcript, closingContextMessage];
 	}
 
 	const keepFirst = 2;
-	const keepLast = maxMessages - keepFirst - 1;
+	const keepLast = Math.max(1, maxMessages - keepFirst - 2);
 	const omitted = transcript.length - keepFirst - keepLast;
 	const omittedMessage: AdvisorMessage = {
 		role: "user",
@@ -145,5 +137,5 @@ export function buildAdvisorMessages(
 		timestamp: Date.now(),
 	};
 
-	return ensureAdvisorRequestClosure([contextMessage, ...transcript.slice(0, keepFirst), omittedMessage, ...transcript.slice(-keepLast)]);
+	return [...transcript.slice(0, keepFirst), omittedMessage, ...transcript.slice(-keepLast), closingContextMessage];
 }

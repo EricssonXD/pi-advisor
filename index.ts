@@ -99,28 +99,6 @@ Output format:
 
 Keep it short. The executor will read your advice and immediately act on it.`;
 
-const EXECUTOR_ADVISOR_GUIDANCE = `
-<advisor-tool>
-You have access to an advisor tool that consults a stronger model for strategic guidance.
-You remain executor. Advisor gives guidance only. You decide and continue.
-
-Use advisor when:
-- After 2-3 exploratory reads, before committing to an implementation approach
-- Stuck, confused, or after a failed attempt
-- After implementation + verification output, before declaring the task complete
-
-Do not use advisor for:
-- Syntax questions, API lookups, or routine implementation steps
-- Tasks completable in <5 tool calls
-- Mid-execution when you already have a clear plan and it's working
-- Checking whether your plan is "okay" — just execute and call advisor at the stage boundaries above
-
-How to use the response:
-- Advisor returns: verdict ("On track" / "Course-correct" / "Not done yet") + action items
-- Execute the action items in order unless you have concrete evidence that contradicts them
-- If you disagree with the advice, state the conflict explicitly — do not silently ignore
-</advisor-tool>`;
-
 function configPath(): string {
 	return join(getAgentDir(), "advisor.json");
 }
@@ -204,17 +182,15 @@ function buildRecentToolActivity(events: RunToolEvent[]): string {
 		.join("\n");
 }
 
-function buildAdvisorPrompt(executorSystemPrompt: string, activeToolsSummary: string, stageInfo: AdvisorStageInfo): string {
+// Stage specifics live in the final context message next to the freshest
+// evidence (see buildAdvisorMessages); the system prompt stays stage-agnostic.
+function buildAdvisorPrompt(executorSystemPrompt: string, activeToolsSummary: string): string {
 	const trimmedSystemPrompt = executorSystemPrompt.trim();
 	const boundedSystemPrompt = trimmedSystemPrompt.length > MAX_SYSTEM_PROMPT_CHARS
 		? `${trimmedSystemPrompt.slice(0, MAX_SYSTEM_PROMPT_CHARS).trimEnd()}\n[executor system prompt truncated for advisor context]`
 		: trimmedSystemPrompt;
 
 	return `${ADVISOR_SYSTEM_PROMPT}
-
-Current stage: ${stageInfo.stage}
-Stage objective: ${stageDirective(stageInfo.stage)}
-Why this stage: ${stageInfo.reason}
 
 Executor system prompt:
 <<<SYSTEM_PROMPT
@@ -235,14 +211,6 @@ export default function advisorExtension(pi: ExtensionAPI) {
 	let config = loadConfig();
 	let usesThisRun = 0;
 	let runToolEvents: RunToolEvent[] = [];
-
-	pi.on("before_agent_start", async (event) => {
-		config = loadConfig();
-		if (!config.enabled) return;
-		return {
-			systemPrompt: `${event.systemPrompt}\n\n${EXECUTOR_ADVISOR_GUIDANCE}`,
-		};
-	});
 
 	pi.on("agent_start", async (_, ctx) => {
 		usesThisRun = 0;
@@ -289,8 +257,8 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 			"Call advisor({ stage: 'recovery' }) when stuck, confused, or after a failed attempt",
 			"Call advisor({ stage: 'final-check' }) after implementation + verification, before declaring complete",
 			"Call advisor() with no args to auto-detect the stage",
-			"Skip for tasks completable in <5 tool calls",
-			"Execute returned action items unless evidence contradicts — then state the conflict",
+			"Do not call advisor for syntax questions, API lookups, routine steps, tasks completable in <5 tool calls, or when your current plan is working",
+			"You remain executor: advisor only advises. Execute returned action items unless evidence contradicts — then state the conflict explicitly instead of silently ignoring",
 		],
 		parameters: Type.Object({
 			stage: Type.Optional(Type.Union([Type.Literal("initial"), Type.Literal("recovery"), Type.Literal("final-check")])),
@@ -324,13 +292,19 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 				};
 			}
 
-			const stageInfo = params.stage
+			const stageInfo: AdvisorStageInfo = params.stage
 				? { stage: params.stage, reason: "Executor explicitly signaled this stage." }
 				: detectStage(runToolEvents, usesThisRun + 1);
 			const recentToolActivity = buildRecentToolActivity(runToolEvents);
 			const branch = ctx.sessionManager.getBranch();
 			const signals = buildExecutorSignals(runToolEvents);
-			const advisorMessages = buildAdvisorMessages(branch, stageInfo, recentToolActivity, config.maxContextMessages, signals);
+			const advisorMessages = buildAdvisorMessages(
+				branch,
+				{ ...stageInfo, directive: stageDirective(stageInfo.stage) },
+				recentToolActivity,
+				config.maxContextMessages,
+				signals,
+			);
 			if (advisorMessages.length === 0) {
 				return {
 					content: [{ type: "text", text: "No conversation context available for advisor. Continue without advice." }],
@@ -342,7 +316,7 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 			usesThisRun++;
 
 			const executorSystemPrompt = ctx.getSystemPrompt();
-			const advisorPrompt = buildAdvisorPrompt(executorSystemPrompt, buildActiveToolsSummary(pi), stageInfo);
+			const advisorPrompt = buildAdvisorPrompt(executorSystemPrompt, buildActiveToolsSummary(pi));
 
 			try {
 				const response = await completeSimple(
@@ -359,6 +333,9 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 						maxTokens: config.maxTokens,
 						signal,
 						reasoning: config.reasoning,
+						// Session-affine cache routing: repeated consultations replay
+						// mostly the same prefix, so let the provider cache it.
+						sessionId: ctx.sessionManager.getSessionId(),
 					},
 				);
 

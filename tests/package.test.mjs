@@ -104,15 +104,15 @@ test('advisor transcript strips historical tool calls from assistant messages', 
   ];
 
   const messages = buildAdvisorMessages(branch, stageInfo, '- read src/foo.ts', 10);
-  assert.equal(messages.length, 4);
+  assert.equal(messages.length, 3);
 
-  const assistant = messages[2];
+  const assistant = messages[1];
   assert.equal(assistant.role, 'assistant');
   assert.deepEqual(assistant.content, [{ type: 'text', text: 'I will inspect the file.' }]);
   assert.doesNotMatch(JSON.stringify(messages), /call_abc123/);
   assert.doesNotMatch(JSON.stringify(messages), /"toolCall"/);
 
-  const closure = messages[3];
+  const closure = messages[2];
   assert.equal(closure.role, 'user');
   assert.match(closure.content, /Provide your advisory assessment/);
 });
@@ -140,7 +140,7 @@ test('advisor closure: ends with assistant → closure appended', () => {
   assert.match(last.content, /Provide your advisory assessment/);
 });
 
-test('advisor closure: ends with user → unchanged', () => {
+test('advisor closure: ends with user → closing context still appended after it', () => {
   const stageInfo = { stage: 'initial', reason: 'test' };
   const branch = [
     {
@@ -164,7 +164,8 @@ test('advisor closure: ends with user → unchanged', () => {
   const messages = buildAdvisorMessages(branch, stageInfo, '', 10);
   const last = messages[messages.length - 1];
   assert.equal(last.role, 'user');
-  assert.equal(last.content, 'Next question here');
+  assert.match(last.content, /Provide your advisory assessment/);
+  assert.equal(messages[messages.length - 2].content, 'Next question here');
 });
 
 test('advisor closure: truncated path ends with assistant → closure appended', () => {
@@ -201,10 +202,24 @@ test('advisor context: includes context policy block', () => {
   ];
 
   const messages = buildAdvisorMessages(branch, stageInfo, '- read foo', 10);
-  const contextMsg = messages[0];
+  const contextMsg = messages[messages.length - 1];
   assert.equal(contextMsg.role, 'user');
   assert.match(contextMsg.content, /Context policy/);
   assert.match(contextMsg.content, /Assistant tool calls are stripped/);
+});
+
+test('advisor context: stage directive included when provided', () => {
+  const stageInfo = { stage: 'final-check', reason: 'test', directive: 'Verify all requirements are met.' };
+  const branch = [
+    {
+      type: 'message',
+      message: { role: 'user', content: 'Task', timestamp: 1 },
+    },
+  ];
+
+  const messages = buildAdvisorMessages(branch, stageInfo, '', 10);
+  const contextMsg = messages[messages.length - 1];
+  assert.match(contextMsg.content, /Stage objective: Verify all requirements are met\./);
 });
 
 test('advisor context: includes executor signals when provided', () => {
@@ -224,7 +239,7 @@ test('advisor context: includes executor signals when provided', () => {
   };
 
   const messages = buildAdvisorMessages(branch, stageInfo, '- read foo', 10, signals);
-  const contextMsg = messages[0];
+  const contextMsg = messages[messages.length - 1];
   assert.match(contextMsg.content, /Executor signals/);
   assert.match(contextMsg.content, /Phase: exploring/);
   assert.match(contextMsg.content, /Mutations: 0/);
@@ -240,7 +255,7 @@ test('advisor context: no executor signals block when signals omitted', () => {
   ];
 
   const messages = buildAdvisorMessages(branch, stageInfo, '- read foo', 10);
-  const contextMsg = messages[0];
+  const contextMsg = messages[messages.length - 1];
   assert.doesNotMatch(contextMsg.content, /Executor signals/);
 });
 
@@ -261,7 +276,7 @@ test('advisor context: signals reflect mutations and failures', () => {
   };
 
   const messages = buildAdvisorMessages(branch, stageInfo, '- edit src/foo.ts', 10, signals);
-  const contextMsg = messages[0];
+  const contextMsg = messages[messages.length - 1];
   assert.match(contextMsg.content, /Phase: verifying/);
   assert.match(contextMsg.content, /Mutations: 3/);
   assert.match(contextMsg.content, /pnpm test, pnpm lint/);

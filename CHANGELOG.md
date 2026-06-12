@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Edit/write summaries in advisor context now include `(+added/-removed)` line stats derived from the edit tool's unified patch details.
 
 ### Changed
+- Removed the duplicated `<advisor-tool>` system prompt injection: usage guidance now lives solely in the tool's `promptGuidelines`, which pi injects natively when the tool is active. The executor system prompt no longer carries the advisor instructions twice.
+- Advisor context (stage, directive, executor signals, recent tool activity) moved from the head of the transcript to the closing user message, next to where model attention is strongest; the advisor system prompt is now stage-agnostic and stable across calls.
+- Advisor model calls now pass the pi session ID for provider-side cache affinity across repeated consultations.
 - Extracted pure signal logic (`detectStage`, `summarizeToolResult`, `buildExecutorSignals`, `isVerificationCommand`, `shouldNudge`) into `src/advisor-signals.ts` so it is unit-testable without pi imports.
 - Tool activity tracking now listens to the `tool_result` event, which carries tool input and typed details directly — the `tool_execution_start`/`tool_execution_end` bookkeeping and the per-call args map are gone.
 - `isVerificationCommand` now matches the leading token of each pipeline segment instead of substrings anywhere in the command, so paths like `cat tests/foo.test.ts` no longer count as verification runs.
