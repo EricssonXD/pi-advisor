@@ -321,6 +321,11 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 			const advisorPrompt = buildAdvisorPrompt(executorSystemPrompt, buildActiveToolsSummary(pi));
 
 			try {
+				// Codex response chaining is connection-scoped. Reusing the executor's
+				// session ID lets the nested advisor call inherit a stale previous_response_id.
+				const sessionId = model.api === "openai-codex-responses"
+					? undefined
+					: ctx.sessionManager.getSessionId();
 				const response = await completeSimple(
 					model,
 					{
@@ -335,9 +340,8 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 						maxTokens: config.maxTokens,
 						signal,
 						reasoning: config.reasoning,
-						// Session-affine cache routing: repeated consultations replay
-						// mostly the same prefix, so let the provider cache it.
-						sessionId: ctx.sessionManager.getSessionId(),
+						// Session-affine cache routing is safe for providers other than Codex.
+						sessionId,
 					},
 				);
 
