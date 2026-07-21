@@ -11,6 +11,10 @@
 
 The advisor sees a curated transcript, understands the current task stage, and returns a verdict plus numbered action items.
 
+## Attribution
+
+This repository is based on the original `pi-advisor` project by [RimuruW](https://github.com/RimuruW). See the [upstream repository](https://github.com/RimuruW/pi-advisor) and the retained MIT copyright notice in [LICENSE](LICENSE).
+
 ## Features
 
 - **Stage-aware guidance** — automatically detects whether the executor is exploring, stuck, or ready for final verification, and tailors the advisor prompt accordingly
