@@ -23,7 +23,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import { completeSimple, type Message, type TextContent, type ThinkingContent, type ThinkingLevel } from "@earendil-works/pi-ai";
+import { type Message, type TextContent, type ThinkingContent, type ThinkingLevel } from "@earendil-works/pi-ai";
 import { getAgentDir, keyHint, type ExtensionAPI, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { buildAdvisorMessages } from "./src/advisor-messages.ts";
 import {
@@ -285,15 +285,6 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 				};
 			}
 
-			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok || !auth.apiKey) {
-				const errorMsg = auth.ok ? "No API key" : auth.error;
-				return {
-					content: [{ type: "text", text: `${errorMsg} for advisor model ${config.provider}/${config.model}. Continue without advice.` }],
-					details: { error: "no_api_key", callNumber: usesThisRun } as AdvisorDetails,
-				};
-			}
-
 			const stageInfo: AdvisorStageInfo = params.stage
 				? { stage: params.stage, reason: "Executor explicitly signaled this stage." }
 				: detectStage(runToolEvents, usesThisRun + 1);
@@ -326,7 +317,7 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 				const sessionId = model.api === "openai-codex-responses"
 					? undefined
 					: ctx.sessionManager.getSessionId();
-				const response = await completeSimple(
+				const response = await ctx.modelRegistry.complete(
 					model,
 					{
 						systemPrompt: advisorPrompt,
@@ -335,8 +326,6 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 						messages: advisorMessages as Message[],
 					},
 					{
-						apiKey: auth.apiKey,
-						headers: auth.headers,
 						maxTokens: config.maxTokens,
 						signal,
 						reasoning: config.reasoning,
