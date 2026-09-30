@@ -21,6 +21,7 @@
  * - /advisor                     — Show status or manually trigger consultation
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { type Message, type TextContent, type ThinkingContent, type ThinkingLevel } from "@earendil-works/pi-ai";
@@ -60,6 +61,89 @@ interface AdvisorDetails {
 	stage?: AdvisorStage;
 	error?: string;
 	message?: string;
+}
+
+// Optional pi-usage v1 structural contract: never import a tracker installation.
+type UsageResult<T> = { ok: true; value: T } | { ok: false; code: string };
+type UsageContext = Readonly<{
+	version: 1; generation: string; ledgerId: string;
+	sessionId: string; rootSessionId: string; workflowId: string | null; source: string;
+	toolCallId: string | null; rootToolCallId: string | null; parentToolCallId: string | null;
+}>;
+type UsageTokens = Partial<Record<"input" | "output" | "cacheRead" | "cacheWrite" | "reasoning" | "cacheWrite1h" | "providerTotal", number | null>>;
+type UsageInput = {
+	id: string; attemptId: string; eventTime: number; provider: string | null; api: string | null; model: string | null;
+	representation: "detailed"; tokens: UsageTokens;
+	price: { amount: number | null; evidence: "catalog-estimate" | "unknown"; catalogVersion?: string };
+	callCount: number; durationMs: number; outcome: "success" | "error" | "aborted";
+};
+type UsageCompletion = { id: string; endedAt: number; usageId?: string; outcome?: "no-usage" | "error" | "interrupted" };
+type UsageService = {
+	version: 1; generation: string; capabilities: { context: boolean; reporting: boolean };
+	captureContext(options: { source: string; toolCallId: string; rootToolCallId: string }): UsageResult<UsageContext>;
+	beginAttempt(input: { context: UsageContext; id: string; startedAt: number }): Promise<UsageResult<unknown>>;
+	finishAttempt(input: { context: UsageContext; completion: UsageCompletion; usage?: UsageInput }): Promise<UsageResult<unknown>>;
+};
+type AdvisorTracking = { service: UsageService; context: UsageContext; attempt: { id: string; startedAt: number } };
+
+function captureAdvisorTracking(pi: ExtensionAPI, toolCallId: string): AdvisorTracking | undefined {
+	let service: UsageService | undefined;
+	let accepting = true;
+	try {
+		pi.events.emit("pi-usage:v1:discover", { version: 1, reply: (result: UsageResult<UsageService>) => {
+			if (!accepting || !result?.ok) return;
+			const value = result.value;
+			if (value?.version === 1 && value.capabilities?.context && value.capabilities?.reporting &&
+				typeof value.captureContext === "function" && typeof value.beginAttempt === "function" && typeof value.finishAttempt === "function") service = value;
+		} });
+	} catch { /* Discovery is optional and synchronous. */ }
+	finally { accepting = false; }
+	if (!service) return undefined;
+	try {
+		const captured = service.captureContext({ source: "pi-advisor", toolCallId, rootToolCallId: toolCallId });
+		if (!captured.ok) return undefined;
+		return { service, context: Object.freeze({ ...captured.value }), attempt: { id: `advisor:${randomUUID()}`, startedAt: Date.now() } };
+	} catch { return undefined; }
+}
+
+async function finishAdvisorTracking(
+	pi: ExtensionAPI, tracking: AdvisorTracking | undefined,
+	response?: { provider?: string; api?: string; model?: string; responseModel?: string; stopReason?: string; errorMessage?: string; usage?: UsageTokens & { totalTokens?: number; cost?: { total?: number } } },
+	failed = false,
+): Promise<void> {
+	if (!tracking) return;
+	const { service, context, attempt } = tracking;
+	const endedAt = Math.max(Date.now(), attempt.startedAt);
+	let usage: UsageInput | undefined;
+	try {
+		if (response?.usage) {
+			const native = response.usage;
+			const outcome = response.stopReason === "aborted" ? "aborted" : response.stopReason === "error" || response.errorMessage ? "error" : "success";
+			const tokens: UsageTokens = {};
+			for (const key of ["input", "output", "cacheRead", "cacheWrite", "reasoning", "cacheWrite1h", "providerTotal"] as const) tokens[key] = native[key] ?? null;
+			tokens.providerTotal = native.totalTokens ?? native.providerTotal ?? null;
+			// SDK error placeholders do not establish zero-cost/token evidence.
+			const allZero = [native.input, native.output, native.cacheRead, native.cacheWrite].every(n => n === 0) && (tokens.providerTotal == null || tokens.providerTotal === 0);
+			const amount = native.cost?.total;
+			usage = {
+				id: `usage:${attempt.id}`, attemptId: attempt.id, eventTime: endedAt,
+				provider: response.provider ?? null, api: response.api ?? null, model: response.responseModel ?? response.model ?? null,
+				representation: "detailed", tokens: outcome !== "success" && allZero ? {} : tokens,
+				price: typeof amount === "number" && Number.isFinite(amount) && amount > 0
+					? { amount, evidence: "catalog-estimate", catalogVersion: "pi-capture-v1" } : { amount: null, evidence: "unknown" },
+				callCount: 1, durationMs: endedAt - attempt.startedAt, outcome,
+			};
+		}
+		const completion: UsageCompletion = usage
+			? { id: attempt.id, endedAt, usageId: usage.id }
+			: { id: attempt.id, endedAt, outcome: response?.stopReason === "aborted" ? "interrupted" : failed || response?.stopReason === "error" || response?.errorMessage ? "error" : "no-usage" };
+		if (usage) {
+			// Journal before the API ack; include the attempt even if begin failed. Replay
+			// and the API use exactly these IDs, so recovery never adds a second charge.
+			try { pi.appendEntry("pi-usage.record", { version: 1, context, attempt, usage, completion }); } catch { /* Still try durable reporting. */ }
+		}
+		await service.finishAttempt({ context, completion, ...(usage ? { usage } : {}) });
+	} catch { /* Telemetry cannot replace advice; the marker/attempt retains recovery evidence. */ }
 }
 
 const DEFAULT_CONFIG: AdvisorConfig = {
@@ -266,9 +350,9 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 			stage: Type.Optional(Type.Union([Type.Literal("initial"), Type.Literal("recovery"), Type.Literal("final-check")])),
 		}),
 
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			config = loadConfig();
-			ctx.ui.setStatus("advisor-nudge", undefined);
+			try { ctx.ui.setStatus("advisor-nudge", undefined); } catch { /* UI telemetry is optional. */ }
 
 			if (usesThisRun >= config.maxUsesPerRun) {
 				return {
@@ -310,6 +394,13 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 
 			const executorSystemPrompt = ctx.getSystemPrompt();
 			const advisorPrompt = buildAdvisorPrompt(executorSystemPrompt, buildActiveToolsSummary(pi));
+			// Snapshot ownership before any async SDK work; a later consumed request
+			// must not take ownership of this consultation.
+			const tracking = captureAdvisorTracking(pi, toolCallId);
+			if (tracking) {
+				try { await tracking.service.beginAttempt({ context: tracking.context, ...tracking.attempt }); } catch { /* Advice still proceeds. */ }
+			}
+			let responseReceived = false;
 
 			try {
 				// Codex response chaining is connection-scoped. Reusing the executor's
@@ -334,6 +425,9 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 					},
 				);
 
+				responseReceived = true;
+				await finishAdvisorTracking(pi, tracking, response);
+
 				const textBlocks = response.content.filter((b): b is TextContent => b.type === "text");
 				const thinkingBlocks = response.content.filter((b): b is ThinkingContent => b.type === "thinking");
 				const adviceText = textBlocks.map((b) => b.text).join("\n").trim();
@@ -356,13 +450,14 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 					};
 				}
 
-				pi.appendEntry("advisor-usage", usage);
+				try { pi.appendEntry("advisor-usage", usage); } catch { /* Legacy metrics storage must not block advice. */ }
 
 				return {
 					content: [{ type: "text", text: finalText || response.errorMessage || "(Advisor returned empty response)" }],
 					details: { usage, callNumber: usesThisRun, stage: stageInfo.stage, error: response.errorMessage ? "model_error" : undefined } as AdvisorDetails,
 				};
 			} catch (err) {
+				if (!responseReceived) await finishAdvisorTracking(pi, tracking, undefined, true);
 				const msg = err instanceof Error ? err.message : String(err);
 				return {
 					content: [{ type: "text", text: `Advisor call failed: ${msg}. Continue without advice.` }],
