@@ -58,6 +58,8 @@ test('README documents install and usage', () => {
   assert.match(readme, /pi install npm:pi-advisor/i);
   assert.match(readme, /pi install git:github\.com\/RimuruW\/pi-advisor/i);
   assert.match(readme, /\/advisor on/i);
+  assert.match(readme, /\/advisor usage/i);
+  assert.match(readme, /Costs are estimates from Pi's model pricing catalog/i);
   assert.match(readme, /pi package/i);
 });
 

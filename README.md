@@ -20,8 +20,8 @@ This repository is based on the original `pi-advisor` project by [RimuruW](https
 - **Stage-aware guidance** — automatically detects whether the executor is exploring, stuck, or ready for final verification, and tailors the advisor prompt accordingly
 - **Curated context** — sends only relevant conversation history, bounded system prompt, and recent tool activity to keep token usage efficient
 - **Configurable model & effort** — choose any provider/model and tune reasoning effort (`minimal`–`xhigh`), token budget, and context window
-- **Slash commands** — `/advisor on`, `/advisor off`, `/advisor config`, `/advisor ask` with tab completion
-- **Compact TUI rendering** — advisor output renders inline with token usage, stage label, and expand-to-read hint
+- **Slash commands** — `/advisor on`, `/advisor off`, `/advisor config`, `/advisor ask`, and `/advisor usage`
+- **Usage tracking** — records per-call tokens and estimated cost in the session; the TUI shows call usage and `/advisor usage` reports session totals
 
 ## Install
 
@@ -63,6 +63,7 @@ Enable with a specific model:
 | `/advisor config` | Show full configuration |
 | `/advisor config key=value` | Set a config value |
 | `/advisor ask` | Manually trigger advisor consultation |
+| `/advisor usage` | Show advisor token and estimated-cost totals for the current session branch |
 
 ### Configuration
 
@@ -82,6 +83,8 @@ Enable with a specific model:
 | `maxContextMessages` | `18` | Max transcript messages sent to advisor |
 
 Configuration persists to `~/.pi/agent/advisor.json`.
+
+Usage is stored in the Pi session branch and survives session resume. Costs are estimates from Pi's model pricing catalog; they are unavailable when the model has no listed rates and may differ from provider billing.
 
 ## Architecture
 
@@ -139,9 +142,11 @@ The extension infers the executor's current stage from recent tool activity:
 ├── index.ts              # Extension entrypoint (tool + command registration)
 ├── src/
 │   ├── advisor-messages.ts   # Transcript curation for advisor context
-│   └── advisor-signals.ts    # Pure stage/signal detection logic
+│   ├── advisor-signals.ts    # Pure stage/signal detection logic
+│   └── advisor-usage.ts      # Persisted usage aggregation
 ├── tests/
 │   ├── advisor-signals.test.mjs  # Signal logic unit tests
+│   ├── advisor-usage.test.mjs    # Usage aggregation test
 │   └── package.test.mjs          # Package manifest & smoke tests
 ├── package.json
 ├── package-lock.json

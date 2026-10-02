@@ -18,7 +18,8 @@
  * - /advisor on [provider/model] — Enable advisor tool (persists to config)
  * - /advisor off                 — Disable advisor tool (persists to config)
  * - /advisor config [key=value]  — Show/edit advisor configuration
- * - /advisor                     — Show status or manually trigger consultation
+ * - /advisor usage               — Show current session token/cost totals
+ * - /advisor                     — Show status
  */
 
 import { randomUUID } from "node:crypto";
@@ -27,6 +28,7 @@ import { dirname, join } from "path";
 import { type Message, type TextContent, type ThinkingContent, type ThinkingLevel } from "@earendil-works/pi-ai";
 import { getAgentDir, keyHint, type ExtensionAPI, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { buildAdvisorMessages } from "./src/advisor-messages.ts";
+import { aggregateAdvisorUsage, recordAdvisorUsage, type AdvisorUsageRecord } from "./src/advisor-usage.ts";
 import {
 	buildExecutorSignals,
 	detectStage,
@@ -49,14 +51,8 @@ interface AdvisorConfig {
 	maxContextMessages: number;
 }
 
-interface AdvisorUsage {
-	inputTokens: number;
-	outputTokens: number;
-	model: string;
-}
-
 interface AdvisorDetails {
-	usage?: AdvisorUsage;
+	usage?: AdvisorUsageRecord;
 	callNumber: number;
 	stage?: AdvisorStage;
 	error?: string;
@@ -220,6 +216,18 @@ function formatTokens(count: number): string {
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
 	if (count < 1000000) return `${Math.round(count / 1000)}k`;
 	return `${(count / 1000000).toFixed(1)}M`;
+}
+
+function formatCost(costUsd: number): string {
+	return `$${costUsd.toFixed(costUsd < 0.01 ? 6 : 4)}`;
+}
+
+function formatUsage(usage: AdvisorUsageRecord): string {
+	const cache = usage.cacheReadTokens || usage.cacheWriteTokens
+		? ` cache ${formatTokens(usage.cacheReadTokens)} read/${formatTokens(usage.cacheWriteTokens)} write`
+		: "";
+	const cost = usage.costUsd === undefined ? "cost unavailable" : `${formatCost(usage.costUsd)} est.`;
+	return `↑${formatTokens(usage.inputTokens)} ↓${formatTokens(usage.outputTokens)}${cache} ${cost} ${usage.provider}/${usage.model}`;
 }
 
 const STAGE_LABELS: Record<AdvisorStage, string> = {
@@ -436,11 +444,11 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 				// If no text but thinking exists, use thinking as fallback
 				const finalText = adviceText || (thinkingText ? `(thinking)\n${thinkingText}` : "");
 
-				const usage: AdvisorUsage = {
-					inputTokens: response.usage?.input ?? 0,
-					outputTokens: response.usage?.output ?? 0,
-					model: config.model,
-				};
+				let usage: AdvisorUsageRecord | undefined;
+				try {
+					usage = recordAdvisorUsage(response.usage, config.provider, config.model, model.cost);
+					if (usage) pi.appendEntry("advisor-usage", usage);
+				} catch { /* Preserve useful advice even when legacy metrics storage fails. */ }
 
 				// Detect silent failures: empty content with no error thrown
 				if (!finalText && !response.errorMessage) {
@@ -449,8 +457,6 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 						details: { usage, callNumber: usesThisRun, stage: stageInfo.stage, error: "empty_response" } as AdvisorDetails,
 					};
 				}
-
-				try { pi.appendEntry("advisor-usage", usage); } catch { /* Legacy metrics storage must not block advice. */ }
 
 				return {
 					content: [{ type: "text", text: finalText || response.errorMessage || "(Advisor returned empty response)" }],
@@ -479,7 +485,13 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 			}
 
 			if (details?.error) {
-				return new Text(theme.fg("error", "Advisor unavailable: ") + theme.fg("dim", text), 0, 0);
+				const container = new Container();
+				container.addChild(new Text(theme.fg("error", "Advisor unavailable: ") + theme.fg("dim", text), 0, 0));
+				if (details.usage) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", formatUsage(details.usage)), 0, 0));
+				}
+				return container;
 			}
 
 			const container = new Container();
@@ -502,13 +514,7 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 
 			if (details?.usage) {
 				container.addChild(new Spacer(1));
-				container.addChild(
-					new Text(
-						theme.fg("dim", `↑${formatTokens(details.usage.inputTokens)} ↓${formatTokens(details.usage.outputTokens)} ${details.usage.model}`),
-						0,
-						0,
-					),
-				);
+				container.addChild(new Text(theme.fg("dim", formatUsage(details.usage)), 0, 0));
 			}
 
 			return container;
@@ -516,9 +522,9 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 	});
 
 	pi.registerCommand("advisor", {
-		description: "Manage advisor tool: on, off, config, ask",
+		description: "Manage advisor tool: on, off, config, ask, usage",
 		getArgumentCompletions: (prefix) => {
-			const subcommands = ["on", "off", "config", "ask"];
+			const subcommands = ["on", "off", "config", "ask", "usage"];
 			const trimmed = prefix.trim();
 			if (!trimmed.includes(" ")) {
 				const matches = subcommands.filter((s) => s.startsWith(trimmed));
@@ -578,6 +584,30 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 					break;
 				}
 
+				case "usage": {
+					const totals = aggregateAdvisorUsage(ctx.sessionManager.getBranch());
+					if (totals.calls === 0) {
+						ctx.ui.notify("No advisor usage recorded in this session branch.", "info");
+						return;
+					}
+					const cost = totals.pricedCalls === totals.calls
+						? `${formatCost(totals.costUsd)} estimated`
+						: totals.pricedCalls > 0
+							? `${formatCost(totals.costUsd)} estimated (${totals.pricedCalls}/${totals.calls} calls had pricing data)`
+							: "unavailable";
+					ctx.ui.notify([
+						"Advisor usage (current session branch)",
+						`  Calls:      ${totals.calls}`,
+						`  Input:      ${formatTokens(totals.inputTokens)} tokens`,
+						`  Output:     ${formatTokens(totals.outputTokens)} tokens`,
+						`  Cache read: ${formatTokens(totals.cacheReadTokens)} tokens`,
+						`  Cache write: ${formatTokens(totals.cacheWriteTokens)} tokens`,
+						...(totals.cacheUnknownCalls > 0 ? [`  Cache counts missing for ${totals.cacheUnknownCalls} older calls`] : []),
+						`  Cost:       ${cost}`,
+					].join("\n"), "info");
+					break;
+				}
+
 				case "config": {
 					if (!rest) {
 						const status = config.enabled ? ctx.ui.theme.fg("success", "enabled") : ctx.ui.theme.fg("dim", "disabled");
@@ -597,6 +627,7 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 							"  /advisor off                  Disable advisor",
 							"  /advisor config key=value     Set config value",
 							"  /advisor ask                  Trigger consultation",
+							"  /advisor usage               Show session token and cost totals",
 							"",
 							"Config keys: provider, model, maxUsesPerRun, maxTokens, reasoning, maxContextMessages",
 							`Reasoning levels: ${VALID_REASONING_LEVELS.join(", ")}`,
@@ -690,6 +721,7 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 						"  /advisor off                  Disable advisor",
 						"  /advisor config               Show full configuration",
 						"  /advisor ask                  Trigger consultation",
+						"  /advisor usage               Show session token and cost totals",
 					];
 					ctx.ui.notify(lines.join("\n"), "info");
 				}
