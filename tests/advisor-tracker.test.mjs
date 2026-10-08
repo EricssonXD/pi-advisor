@@ -120,6 +120,7 @@ async function fixture({ tracked = true, real = false, branch, noModel = false, 
       getAvailable: () => noModel ? [] : [{ provider: 'configured-provider', id: 'configured-model', name: 'Configured model' }],
       async complete(...args) { calls++; return complete(...args); } },
     ui: { setStatus() { if (uiFailure) throw new Error('UI metrics unavailable'); },
+      theme: { fg: (_color, text) => text },
       notify(...message) { notifications.push(message); },
       custom(factory) { customCalls++; return new Promise(resolve => factory({ requestRender() {} }, { fg: (_color, text) => text, bold: text => text }, { matches: () => false }, resolve)); },
     },
@@ -165,6 +166,14 @@ test('advisor model picker reports when no configured-provider models are availa
     await f.commands.get('advisor').handler('model', f.ctx);
     assert.equal(f.notifications.at(-1)[0], 'No models available for configured providers. Use /login to add providers.');
     assert.equal(f.customCalls, 0);
+  } finally { await f.close(); }
+});
+
+test('advisor help lists the model picker command', async () => {
+  const f = await fixture({ tracked: false });
+  try {
+    await f.commands.get('advisor').handler('', f.ctx);
+    assert.match(f.notifications.at(-1)[0], /\/advisor model \[search\]/);
   } finally { await f.close(); }
 });
 
