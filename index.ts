@@ -15,7 +15,8 @@
  * - Is invoked at the executor's discretion
  *
  * Commands:
- * - /advisor on [provider/model] — Enable advisor tool (persists to config)
+ * - /advisor on [provider/model] — Enable advisor, opening the model picker when omitted
+ * - /advisor model [search]    — Change the advisor model with a searchable picker
  * - /advisor off                 — Disable advisor tool (persists to config)
  * - /advisor config [key=value]  — Show/edit advisor configuration
  * - /advisor usage               — Show current session token/cost totals
@@ -26,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { type Message, type TextContent, type ThinkingContent, type ThinkingLevel } from "@earendil-works/pi-ai";
-import { getAgentDir, keyHint, type ExtensionAPI, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, keyHint, type ExtensionAPI, type ExtensionCommandContext, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { buildAdvisorMessages } from "./src/advisor-messages.ts";
 import { aggregateAdvisorUsage, recordAdvisorUsage, type AdvisorUsageRecord } from "./src/advisor-usage.ts";
 import {
@@ -38,7 +39,7 @@ import {
 	type AdvisorStageInfo,
 	type RunToolEvent,
 } from "./src/advisor-signals.ts";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, fuzzyFilter, Input, SelectList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 interface AdvisorConfig {
@@ -228,6 +229,87 @@ function formatUsage(usage: AdvisorUsageRecord): string {
 		: "";
 	const cost = usage.costUsd === undefined ? "cost unavailable" : `${formatCost(usage.costUsd)} est.`;
 	return `↑${formatTokens(usage.inputTokens)} ↓${formatTokens(usage.outputTokens)}${cache} ${cost} ${usage.provider}/${usage.model}`;
+}
+
+async function chooseAdvisorModel(
+	ctx: ExtensionCommandContext,
+	currentProvider: string,
+	currentModel: string,
+	initialSearch = "",
+): Promise<{ provider: string; model: string } | undefined> {
+	const models = ctx.modelRegistry.getAvailable().slice().sort((a, b) => {
+		const aIsCurrent = a.provider === currentProvider && a.id === currentModel;
+		const bIsCurrent = b.provider === currentProvider && b.id === currentModel;
+		return Number(bIsCurrent) - Number(aIsCurrent) || a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
+	});
+	if (models.length === 0) {
+		ctx.ui.notify("No models available for configured providers. Use /login to add providers.", "warning");
+		return undefined;
+	}
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify("The advisor model picker requires TUI mode; use /advisor on provider/model instead.", "warning");
+		return undefined;
+	}
+
+	return ctx.ui.custom((tui, theme, keybindings, done) => {
+		const root = new Container();
+		const search = new Input();
+		const listContainer = new Container();
+		let list: SelectList;
+
+		root.addChild(new Text(theme.fg("accent", theme.bold("Select Advisor Model"))));
+		root.addChild(new Text(theme.fg("warning", "Only models from configured providers are shown. Use /login to add providers.")));
+		root.addChild(search);
+		root.addChild(listContainer);
+		root.addChild(new Spacer(1));
+		root.addChild(new Text(theme.fg("dim", "↑↓ navigate · type to search · enter select · esc cancel")));
+
+		const updateList = () => {
+			const query = search.getValue().trim();
+			const filtered = query ? fuzzyFilter(models, query, (model) => `${model.id} ${model.provider} ${model.name}`) : models;
+			const items = filtered.map((model) => ({
+				value: `${model.provider}\0${model.id}`,
+				label: `${model.provider === currentProvider && model.id === currentModel ? "✓ " : ""}${model.id} [${model.provider}]`,
+				description: model.name,
+			}));
+			list = new SelectList(items, 10, {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			});
+			list.setSelectedIndex(query ? 0 : Math.max(0, filtered.findIndex((model) => model.provider === currentProvider && model.id === currentModel)));
+			list.onSelect = (item) => {
+				const selected = filtered.find((model) => `${model.provider}\0${model.id}` === item.value);
+				if (selected) done({ provider: selected.provider, model: selected.id });
+			};
+			list.onCancel = () => done(undefined);
+			listContainer.clear();
+			listContainer.addChild(list);
+		};
+		updateList();
+		if (initialSearch) {
+			search.setValue(initialSearch);
+			updateList();
+		}
+
+		return {
+			get focused() { return search.focused; },
+			set focused(value: boolean) { search.focused = value; },
+			render(width: number) { return root.render(width); },
+			invalidate() { root.invalidate(); },
+			handleInput(data: string) {
+				if (keybindings.matches(data, "tui.select.up") || keybindings.matches(data, "tui.select.down") || keybindings.matches(data, "tui.select.confirm") || keybindings.matches(data, "tui.select.cancel")) {
+					list.handleInput(data);
+				} else {
+					search.handleInput(data);
+					updateList();
+				}
+				tui.requestRender();
+			},
+		};
+	}, { overlay: false });
 }
 
 const STAGE_LABELS: Record<AdvisorStage, string> = {
@@ -522,9 +604,9 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 	});
 
 	pi.registerCommand("advisor", {
-		description: "Manage advisor tool: on, off, config, ask, usage",
+		description: "Manage advisor tool: on, model, off, config, ask, usage",
 		getArgumentCompletions: (prefix) => {
-			const subcommands = ["on", "off", "config", "ask", "usage"];
+			const subcommands = ["on", "off", "config", "ask", "usage", "model"];
 			const trimmed = prefix.trim();
 			if (!trimmed.includes(" ")) {
 				const matches = subcommands.filter((s) => s.startsWith(trimmed));
@@ -559,6 +641,11 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 						}
 						provider = rest.slice(0, slash);
 						modelId = rest.slice(slash + 1);
+					} else if (ctx.mode === "tui") {
+						const selected = await chooseAdvisorModel(ctx, provider, modelId);
+						if (!selected) return;
+						provider = selected.provider;
+						modelId = selected.model;
 					}
 
 					const model = ctx.modelRegistry.find(provider, modelId);
@@ -573,6 +660,16 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 					saveConfig(config);
 					updateToolRegistration();
 					ctx.ui.notify(`Advisor enabled: ${config.provider}/${config.model}`, "info");
+					break;
+				}
+
+				case "model": {
+					const selected = await chooseAdvisorModel(ctx, config.provider, config.model, rest);
+					if (!selected) return;
+					config.provider = selected.provider;
+					config.model = selected.model;
+					saveConfig(config);
+					ctx.ui.notify(`Advisor model set: ${config.provider}/${config.model}`, "info");
 					break;
 				}
 
@@ -623,7 +720,8 @@ The advisor sees the conversation transcript, your system prompt, and recent too
 							`  Context msgs: ${config.maxContextMessages}`,
 							"",
 							"Usage:",
-							"  /advisor on [provider/model]  Enable advisor",
+							"  /advisor on [provider/model]  Enable advisor or choose its model",
+							"  /advisor model [search]       Change advisor model",
 							"  /advisor off                  Disable advisor",
 							"  /advisor config key=value     Set config value",
 							"  /advisor ask                  Trigger consultation",

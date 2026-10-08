@@ -9,7 +9,10 @@ import { pathToFileURL } from 'node:url';
 // Load the actual extension factory/registered execute, without a host or paid SDK call.
 const host = `export const getAgentDir = () => globalThis.__advisorTestAgentDir;
 export const keyHint = () => '';`;
-const tui = `export class Container { addChild() {} } export class Spacer {} export class Text {}`;
+const tui = `export class Container { addChild() {} clear() {} render() { return []; } invalidate() {} }
+export class Spacer {} export class Text {} export class Input { getValue() { return this.value ?? ''; } setValue(value) { this.value = value; } handleInput() {} }
+export class SelectList { constructor(items) { this.items = items; globalThis.__advisorTestModelList = this; } setSelectedIndex(index) { this.selectedIndex = index; } handleInput() {} }
+export const fuzzyFilter = (items) => items;`;
 const typebox = `export const Type = new Proxy({}, { get: () => () => ({}) });`;
 const hooks = registerHooks({ resolve(specifier, context, next) {
   const source = specifier === '@earendil-works/pi-coding-agent' ? host
@@ -85,14 +88,15 @@ function structuralTracker(events) {
 async function fixture({ tracked = true, real = false, branch, noModel = false, appendFailure, uiFailure = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'advisor-tracker-'));
   globalThis.__advisorTestAgentDir = dir;
-  const entries = [], events = bus(), tools = new Map(), handlers = new Map();
+  const entries = [], events = bus(), tools = new Map(), handlers = new Map(), commands = new Map(), notifications = [];
+  let activeToolUpdates = 0, customCalls = 0;
   const appendEntry = (customType, data) => {
     if (appendFailure?.(customType)) throw new Error('telemetry write failed');
     entries.push({ id: `entry-${entries.length}`, type: 'custom', customType, data: structuredClone(data), timestamp: new Date().toISOString() });
   };
   const pi = { events, appendEntry, on(name, callback) { handlers.set(name, callback); },
-    registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {},
-    getActiveTools() { return ['advisor']; }, getAllTools() { return []; }, setActiveTools() {},
+    registerTool(tool) { tools.set(tool.name, tool); }, registerCommand(name, command) { commands.set(name, command); },
+    getActiveTools() { return ['advisor']; }, getAllTools() { return []; }, setActiveTools() { activeToolUpdates++; },
   };
   const manager = { getSessionId: () => 'parent', getSessionFile: () => undefined,
     getEntries: () => entries, getEntryCount: () => entries.length,
@@ -110,18 +114,59 @@ async function fixture({ tracked = true, real = false, branch, noModel = false, 
   } else if (tracked) tracker = structuralTracker(events);
   let complete = async () => response();
   let calls = 0;
-  const ctx = { sessionManager: manager, getSystemPrompt: () => 'SECRET system prompt',
+  const ctx = { sessionManager: manager, getSystemPrompt: () => 'SECRET system prompt', mode: 'tui', scopedModels: [],
+    model: { provider: 'executor-provider', id: 'executor-model' },
     modelRegistry: { find: () => noModel ? undefined : ({ provider: 'configured-provider', id: 'configured-model', api: 'configured-api', cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }),
+      getAvailable: () => noModel ? [] : [{ provider: 'configured-provider', id: 'configured-model', name: 'Configured model' }],
       async complete(...args) { calls++; return complete(...args); } },
-    ui: { setStatus() { if (uiFailure) throw new Error('UI metrics unavailable'); } },
+    ui: { setStatus() { if (uiFailure) throw new Error('UI metrics unavailable'); },
+      notify(...message) { notifications.push(message); },
+      custom(factory) { customCalls++; return new Promise(resolve => factory({ requestRender() {} }, { fg: (_color, text) => text, bold: text => text }, { matches: () => false }, resolve)); },
+    },
   };
   advisorExtension(pi);
-  return { entries, events, tracker, ctx, tools, get calls() { return calls; },
+  return { entries, events, tracker, ctx, tools, commands, notifications, get customCalls() { return customCalls; }, get activeToolUpdates() { return activeToolUpdates; }, get calls() { return calls; },
     setComplete(fn) { complete = fn; }, execute: (id = 'tool-A') => tools.get('advisor').execute(id, {}, undefined, undefined, ctx),
     async close() { if (collector) await collector.shutdown(); rmSync(dir, { recursive: true, force: true }); },
   };
 }
 const canonical = f => f.entries.filter(e => e.customType === 'pi-usage.record');
+
+test('advisor model picker persists selection without changing executor model; cancellation is a no-op', async () => {
+  const f = await fixture({ tracked: false });
+  try {
+    const handler = f.commands.get('advisor').handler;
+    const selectModel = handler('model', f.ctx);
+    globalThis.__advisorTestModelList.onSelect(globalThis.__advisorTestModelList.items[0]);
+    await selectModel;
+    const configPath = join(globalThis.__advisorTestAgentDir, 'advisor.json');
+    const saved = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.deepEqual([saved.provider, saved.model, saved.enabled], ['configured-provider', 'configured-model', false]);
+    assert.deepEqual(f.ctx.model, { provider: 'executor-provider', id: 'executor-model' });
+    const notifications = f.notifications.length;
+    const activeToolUpdates = f.activeToolUpdates;
+
+    const changeModel = handler('model', f.ctx);
+    globalThis.__advisorTestModelList.onCancel();
+    await changeModel;
+    const enable = handler('on', f.ctx);
+    globalThis.__advisorTestModelList.onCancel();
+    await enable;
+    assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')), saved);
+    assert.equal(f.notifications.length, notifications);
+    assert.equal(f.activeToolUpdates, activeToolUpdates);
+    assert.deepEqual(f.ctx.model, { provider: 'executor-provider', id: 'executor-model' });
+  } finally { await f.close(); }
+});
+
+test('advisor model picker reports when no configured-provider models are available', async () => {
+  const f = await fixture({ tracked: false, noModel: true });
+  try {
+    await f.commands.get('advisor').handler('model', f.ctx);
+    assert.equal(f.notifications.at(-1)[0], 'No models available for configured providers. Use /login to add providers.');
+    assert.equal(f.customCalls, 0);
+  } finally { await f.close(); }
+});
 
 // These portable contract tests always run; only the real cross-package cases require an override.
 test('tracker absent: registered execute retains legacy usage/details and never backfills', async () => {

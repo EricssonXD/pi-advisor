@@ -20,7 +20,7 @@ This repository is based on the original `pi-advisor` project by [RimuruW](https
 - **Stage-aware guidance** — automatically detects whether the executor is exploring, stuck, or ready for final verification, and tailors the advisor prompt accordingly
 - **Curated context** — sends only relevant conversation history, bounded system prompt, and recent tool activity to keep token usage efficient
 - **Configurable model & effort** — choose any provider/model and tune reasoning effort (`minimal`–`xhigh`), token budget, and context window
-- **Slash commands** — `/advisor on`, `/advisor off`, `/advisor config`, `/advisor ask`, and `/advisor usage`
+- **Slash commands** — `/advisor on`, `/advisor model`, `/advisor off`, `/advisor config`, `/advisor ask`, and `/advisor usage`
 - **Usage tracking** — records per-call tokens and estimated cost in the session; the TUI shows call usage and `/advisor usage` reports session totals
 
 ## Install
@@ -41,7 +41,7 @@ This is a pi package — install via npm, git, or local path.
 
 ## Usage
 
-Enable the advisor with the default model:
+Choose an advisor model and enable the tool (opens a searchable picker):
 
 ```
 /advisor on
@@ -58,7 +58,8 @@ Enable with a specific model:
 | Command | Description |
 |---|---|
 | `/advisor` | Show current status |
-| `/advisor on [provider/model]` | Enable advisor (optionally set model) |
+| `/advisor on [provider/model]` | Enable advisor; opens the model picker when no model is given |
+| `/advisor model [search]` | Open the searchable picker and change the advisor model without changing the executor model |
 | `/advisor off` | Disable advisor |
 | `/advisor config` | Show full configuration |
 | `/advisor config key=value` | Set a config value |
